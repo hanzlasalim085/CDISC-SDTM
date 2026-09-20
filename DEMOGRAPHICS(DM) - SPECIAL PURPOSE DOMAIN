@@ -1,0 +1,495 @@
+/*=========================================================
+Include the data file
+=========================================================*/
+%let root2=&root.SDTM\SDTM_DM\SDTM_DM_LCSG001\SDTM_DM_LCSG001;
+ 
+ 
+%include "&root2._data.sas";
+ 
+ 
+options validvarname=upcase;
+/*=========================================================
+Programming for the Task
+=========================================================*/
+ 
+/*=========================================================
+Read primary input datasets
+=========================================================*/
+ 
+ 
+data demog01;
+   set demog;
+run;
+ 
+data ipadmin01;
+   set ipadmin;
+run;
+ 
+data eos01;
+   set eos;
+run;
+ 
+data enrl01;
+   set enrlment;
+run;
+ 
+ 
+/*=========================================================
+Create the id variables and other variables which are directly dependent on raw variables without involving major derivations
+=========================================================*/
+ 
+ 
+data dm01;
+   set demog(rename=(race=race0));
+ 
+   length domain $2
+          studyid siteid usubjid subjid $20 race $50
+   ;
+ 
+   studyid=study;
+   domain="DM";
+   subjid=pt;
+   siteid=substrn(pt,1,2);
+   usubjid=catx("-",study,pt);
+ 
+   country=country;
+   ethnic=upcase(ethnic);
+ 
+ 
+   if cmiss(race0,race2,race3,race4) lt 3 then race="MULTIPLE";
+   else race=upcase(coalescec(race0,race2,race3,race4));
+ 
+   racesp=racesp;
+   if race="MULTIPLE" then do;
+      race1=upcase(race0);
+      race2=upcase(race2);
+      race3=upcase(race3);
+      race4=upcase(race4);
+   end;
+ 
+   if not missing(age_raw) then age=input(age_raw,??best.);
+   if not missing(age) then ageu=upcase(age_rawu);
+ 
+   if sex="Female" then sex="F";
+   else if sex="Male" then sex="M";
+ 
+run;
+ 
+/*=========================================================
+Derive disposition related variables
+=========================================================*/
+ 
+/*----------------------------------------------------------
+Informed Consent Date, Enrolled Date and Randomization Date
+----------------------------------------------------------*/
+data rficdtc;
+   set enrl01;
+   length rficdtc enrldtc $20;
+   if not missing(icdt_raw) then rficdtc=put(input(icdt_raw,date11.),yymmdd10.);
+   if not missing(enrldt_raw) then enrldtc=put(input(enrldt_raw,date11.),yymmdd10.);
+   if not missing(randdt_raw) then randdtc=put(input(randdt_raw,date11.),yymmdd10.);
+   keep study pt rficdtc enrldtc randdtc;
+run;
+ 
+ 
+/*----------------------------------------------------------
+Reference End Date
+----------------------------------------------------------*/
+ 
+data rfendtc;
+   set eos01;
+   where eoscat="End of Study";
+   length rfendtc $20;
+   if not missing(eostdt_raw) then rfendtc=put(input(eostdt_raw,date11.),yymmdd10.);
+   keep study pt rfendtc;
+run;
+ 
+/*----------------------------------------------------------
+Death Date
+----------------------------------------------------------*/
+ 
+data dthdtc;
+   set eos01;
+   where eoscat="End of Study" and eoterm="Death";
+   length dthdtc $20;
+   if not missing(eostdt_raw) then dthdtc=put(input(eostdt_raw,date11.),yymmdd10.);
+   dthfl="Y";
+   keep study pt dthdtc dthfl;
+run;
+ 
+/*=========================================================
+Get Exposure Related Variables
+=========================================================*/
+ 
+data exp01;
+   set ipadmin01;
+   if input(ipqty_raw,?? best.) gt 0;
+   length tempdtc $20;
+   if length(ipsttm_raw) ge 4 then time=input(ipsttm_raw,time5.);
+   if time ne . then timec=put(time,tod6.);
+   if not missing(ipstdt_raw) and not missing(timec) then tempdtc=put(input(ipstdt_raw,date11.),yymmdd10.)||"T"||strip(timec);
+   else if not missing(ipstdt_raw) then tempdtc=put(input(ipstdt_raw,date11.),yymmdd10.);
+   keep study pt tempdtc ipboxid;
+run;
+ 
+proc sort data=exp01;
+   by study pt tempdtc;
+run;
+ 
+ 
+/*----------------------------------------------------------
+Date/Time of First Study Treatment <br/>
+Date/Time of Last Study Treatment
+----------------------------------------------------------*/
+ 
+data rfxstdtc(rename=(tempdtc=rfxstdtc))
+     rfxendtc(rename=(tempdtc=rfxendtc) drop=ipboxid);
+   set exp01;
+   by study pt tempdtc;
+   if first.pt then output rfxstdtc;
+   if last.pt then output rfxendtc;
+run;
+ 
+ 
+/*=========================================================
+Derive Planned and Actual Arm related variables
+=========================================================*/
+ 
+/*----------------------------------------------------------
+Planned Arm
+----------------------------------------------------------*/
+ 
+data randno;
+   set enrl01;
+   where randno ne "";
+   keep study pt randno;
+run;
+ 
+proc sort data=randno;
+   by randno;
+run;
+ 
+data rand01;
+   set rand;
+   length randno$6 armcd arm $10;
+   armcd=tx_cd;
+   randno=rand_id;
+   if armcd="ACTIVE" then arm="Active";
+   else if armcd="PBO" then arm="Placebo";
+   keep armcd arm randno;
+run;
+ 
+proc sort data=rand01;
+   by randno;
+run;
+ 
+data armcd;
+   merge randno(in=a) rand01;
+   by randno;
+   if a;
+   keep study pt armcd arm;
+run;
+ 
+proc sort data=armcd;
+   by study pt;
+run;
+ 
+ 
+/*----------------------------------------------------------
+Derive Actual Arm related variables
+----------------------------------------------------------*/
+ 
+proc sort data=rfxstdtc out=actarmcd01;
+   by ipboxid;
+run;
+ 
+data box01;
+   set box;
+   length ipboxid $8 actarmcd actarm $10;
+   ipboxid=kitid;
+   if content="ACTIVE" then do;
+      actarmcd="ACTIVE";
+      actarm="Active";
+   end;
+   else if content="PBO" then do;
+      actarmcd="PBO";
+      actarm="Placebo";
+   end;
+run;
+ 
+proc sort data=box01;
+   by ipboxid;
+run;
+ 
+data actarmcd;
+   merge actarmcd01(in=a) box01(in=b);
+   by ipboxid;
+   if a;
+   keep study pt actarmcd actarm;
+run;
+ 
+proc sort data=actarmcd;
+   by study pt;
+run;
+ 
+ 
+/*=========================================================
+Derive RFPENDTC
+=========================================================*/
+ 
+/*----------------------------------------------------------
+Combine the raw datasets with atleast one date variable in it and rename the date variables to a common name
+----------------------------------------------------------*/
+ 
+data alldates01;
+   length date $20;
+   set adverse(rename=(aestdt_raw=date) keep=study pt aestdt_raw)
+       adverse(rename=(aeendt_raw=date)  keep=study pt aeendt_raw)
+       adverse(rename=(hadmtdt_raw=date) keep=study pt hadmtdt_raw)
+       adverse(rename=(hdsdt_raw=date) keep=study pt hdsdt_raw)
+       conmeds(rename=(cmstdt_raw=date) keep=study pt cmstdt_raw)
+       conmeds(rename=(cmendt_raw=date) keep=study pt cmendt_raw)
+       ecg(rename=(egdt_raw=date) keep=study pt egdt_raw)
+       enrlment(rename=(icdt_raw=date) keep=study pt icdt_raw)
+       enrlment(rename=(enrldt_raw=date) keep=study pt enrldt_raw)
+       enrlment(rename=(randdt_raw=date) keep=study pt randdt_raw)
+       eos(rename=(eostdt_raw=date) keep=study pt eostdt_raw)
+       eoip(rename=(eostdt_raw=date) keep=study pt eostdt_raw)
+       eq5d3l(rename=(dt_raw=date) keep=study pt dt_raw)
+       hosp(rename=(stdt_raw=date) keep=study pt stdt_raw)
+       hosp(rename=(endt_raw=date) keep=study pt endt_raw)
+       ipadmin(rename=(ipstdt_raw=date) keep=study pt ipstdt_raw)
+       lab_chem(rename=(lbdt_raw=date) keep=study pt lbdt_raw)
+       lab_hema(rename=(lbdt_raw=date) keep=study pt lbdt_raw)
+       physmeas(rename=(pmdt_raw=date) keep=study pt pmdt_raw)
+       surg(rename=(surgdt_raw=date) keep=study pt surgdt_raw)
+       vitals(rename=(vsdt_raw=date) keep=study pt vsdt_raw)
+       ;
+run;
+ 
+ 
+/*----------------------------------------------------------
+Process the dates to create date in ISO format
+----------------------------------------------------------*/
+ 
+data alldates02;
+   set alldates01;
+   length day month year datec $10;
+   day=scan(date,1,'/');
+   month=upcase(scan(date,2,'/'));
+   year=scan(date,3,'/');
+   if month="JAN" then month="01";
+   else if month="FEB" then month="02";
+   else if month="MAR" then month="03";
+   else if month="APR" then month="04";
+   else if month="MAY" then month="05";
+   else if month="JUN" then month="06";
+   else if month="JUL" then month="07";
+   else if month="AUG" then month="08";
+   else if month="SEP" then month="09";
+   else if month="OCT" then month="10";
+   else if month="NOV" then month="11";
+   else if month="DEC" then month="12";
+   else month="-";
+ 
+ 
+   dayn=input(day,??best.);
+   yearn=input(year,??best.);
+ 
+   if dayn ne . then dayc=put(dayn,z2.);
+   else dayc="-";
+   if yearn ne . then yearc=put(year,4.);
+   else yearc="-";
+ 
+   datec=strip(yearc)||"-"||strip(month)||"-"||strip(dayc);
+   if compress(datec,"-")="" then datec="";
+ 
+run;
+ 
+ 
+/*----------------------------------------------------------
+Pick the latest non-missing date for each subject
+----------------------------------------------------------*/
+ 
+proc sort data=alldates02 out=alldates03;
+   by study pt datec;
+   where datec ne "";
+run;
+ 
+data rfpendtc;
+   set alldates03;
+   by study pt datec;
+   if last.pt;
+   rfpendtc=datec;
+   keep study pt rfpendtc;
+run;
+ 
+ 
+/*=========================================================
+Merge all datasets together
+=========================================================*/
+ 
+data dm02;
+   merge dm01(in=a)
+         rficdtc
+         dthdtc
+         rfendtc
+         rfxstdtc
+         rfxendtc
+         armcd
+         actarmcd
+         rfpendtc
+         ;
+   by study pt;
+   if a;
+run;
+ 
+ 
+/*=========================================================
+Derive additional variables which are dependent on other derived variables
+=========================================================*/
+ 
+data dm03;
+   length arm actarm $20;
+   set dm02;
+   rfstdtc=substrn(rfxstdtc,1,10);
+   if rfstdtc="" and randdtc ne "" then rfstdtc=randdtc;
+   else if rfstdtc="" and randdtc="" then rfstdtc=rficdtc;
+ 
+   if armcd="" and enrldtc = "" then do;
+      armcd="SCRNFAIL";
+      arm="Screen Failure";
+      actarmcd=armcd;
+      actarm=arm;
+   end;
+   else if armcd="" and  enrldtc ne "" and randdtc="" then do;
+      armcd="NOTASSGN";
+      arm="Not Assigned";
+      actarmcd=armcd;
+      actarm=arm;
+   end;
+   else if armcd ne "" and randdtc ne "" and rfxstdtc="" then do;
+      actarmcd="NOTTRT";
+      actarm="Not Treated";
+   end;
+run;
+ 
+/*=========================================================
+Write attributes and keep only required variables and in the required order
+=========================================================*/
+ 
+%let varlist=STUDYID DOMAIN   USUBJID  SUBJID   RFSTDTC  RFENDTC  RFXSTDTC RFXENDTC RFICDTC  RFPENDTC
+DTHDTC   DTHFL SITEID   AGE   AGEU  SEX   RACE  ETHNIC   ARMCD ARM   ACTARMCD ACTARM   COUNTRY
+RACE1 RACE2 RACE3 RACE4 RACESP;
+data dm04;
+attrib STUDYID label='Study Identifier'
+         DOMAIN label='Domain Abbreviation'
+         USUBJID label='Unique Subject Identifier'
+         SUBJID label='Subject Identifier for the Study'
+         RFSTDTC label='Subject Reference Start Date/Time'
+         RFENDTC label='Subject Reference End Date/Time'
+         RFXSTDTC label='Date/Time of First Study Treatment'
+         RFXENDTC label='Date/Time of Last Study Treatment'
+         RFICDTC label='Date/Time of Informed Consent'
+         RFPENDTC label='Date/Time of End of Participation'
+         DTHDTC label='Date/Time of Death'
+         DTHFL label='Subject Death Flag'
+         SITEID label='Study Site Identifier'
+         AGE label='Age'
+         AGEU label='Age Units'
+         SEX label='Sex'
+         RACE label='Race'
+         ETHNIC label='Ethnicity'
+         ARMCD label='Planned Arm Code'
+         ARM label='Description of Planned Arm'
+         ACTARMCD label='Actual Arm Code'
+         ACTARM label='Description of Actual Arm'
+         COUNTRY label='Country'
+         RACE1 label='Race 1'
+         RACE2 label='Race 2'
+         RACE3 label='Race 3'
+         RACE4 label='Race 4'
+         RACESP label='Race Other Specify'
+;
+ 
+   set dm03;
+keep &varlist.;
+run;
+ 
+/*=========================================================
+Create supplmentary domain
+=========================================================*/
+ 
+/*----------------------------------------------------------
+Transpose the non-parent domain variables
+----------------------------------------------------------*/
+ 
+%let suppquallist=RACE1 RACE2 RACE3 RACE4 RACESP;
+proc sort data=dm04 out=suppdm01;
+   by usubjid;
+run;
+ 
+proc transpose data=suppdm01 out=suppdm02(rename=(col1=QVAL) where=(qval ne "")) name=QNAM label=QLABEL ;
+   by studyid usubjid;
+   var &suppquallist.;
+run;
+ 
+data suppdm03;
+   attrib STUDYID label='Study Identifier'
+      RDOMAIN label='Related Domain Abbreviation'
+      USUBJID label='Unique Subject Identifier'
+      IDVAR label='Identifying Variable'
+      IDVARVAL label='Identifying Variable Value'
+      QNAM label='Qualifier Variable Name'
+      QLABEL label='Qualifier Variable Label'
+      QVAL label='Data Value'
+;
+   retain studyid rdomain usubjid idvar idvarval qnam qlabel qval;
+   set suppdm02;
+   idvar="";
+   idvarval="";
+   rdomain="DM";
+run;
+ 
+ 
+/*=========================================================
+Save final copies of the datasets with dataset labels
+=========================================================*/
+ 
+ 
+options validvarname=v7;
+proc sort data=dm04 out=osCSG001.DM(label="Demographics" drop=&suppquallist.);
+   by usubjid;
+run;
+ 
+proc sort data=suppdm03 out=osCSG001.SUPPDM(label="Supplemental Qualifiers for Demographics");
+   by usubjid idvar idvarval;
+run;
+ 
+/*=========================================================
+Create xpt files
+=========================================================*/
+ 
+%let xptpath=%sysfunc(pathname(osCSG001))\xpt\;
+ 
+libname dm xport "&xptpath.\dm.xpt";
+ 
+proc copy in=osCSG001 out=dm;
+   select dm;
+run;
+ 
+libname suppdm xport "&xptpath.\suppdm.xpt";
+ 
+proc copy in=osCSG001 out=suppdm;
+   select suppdm;
+run;
+ 
+libname dm;
+libname suppdm;
+ 
+ 
+data output;
+    set dm04;
+run;
+ 
+ 
