@@ -1,0 +1,234 @@
+/*=========================================================
+Include the data file
+=========================================================*/
+%let root2=&root.SDTM\SDTM_SV\SDTM_SV_LCSG001\SDTM_SV_LCSG001;
+
+%include "&root2._data.sas";
+
+options validvarname=upcase;
+/*=========================================================
+Programming for the Task
+=========================================================*/
+
+/*=========================================================
+Combine input datasets, once for each date variable in the dataset
+=========================================================*/
+
+/*----------------------------------------------------------
+Convert the date into ISO format
+----------------------------------------------------------*/
+data dates01;
+   length folder sdtmdomain $200 date $20 inputdataset $32;
+   set
+      ipadmin(where=(folder ne "") keep=study pt folder ipstdt_raw rename=(ipstdt_raw=date))
+      lab_chem(where=(folder ne "") keep=study pt folder lbdt_raw rename=(lbdt_raw=date))
+      lab_hema(where=(folder ne "") keep=study pt folder lbdt_raw rename=(lbdt_raw=date))
+      eq5d3l(where=(folder ne "") keep=study pt folder dt_raw rename=(dt_raw=date))
+      physmeas(where=(folder ne "") keep=study pt folder pmdt_raw rename=(pmdt_raw=date))
+      vitals(where=(folder ne "") keep=study pt folder vsdt_raw rename=(vsdt_raw=date))
+      ecg(where=(folder ne "") keep=study pt folder egdt_raw rename=(egdt_raw=date))
+   indsname=__x;
+   inputdataset=upcase(scan(__x,2));
+
+   if inputdataset in ("LAB_HEMA" "LAB_CHEM") then sdtmdomain="LB";
+   else if inputdataset in ("EQ5D3L") then sdtmdomain="QS";
+   else if inputdataset in ("PHYSMEAS" "VITALS") then sdtmdomain="VS";
+   else if inputdataset in ("ECG") then sdtmdomain="EG";
+   else if inputdataset in ("IPADMIN") then sdtmdomain="EC,EX";
+
+   dayn=input(scan(date,1,'/'),?? best.);
+   if dayn ne . then day=put(dayn,z2.);
+
+   monthc=upcase(scan(date,2,'/'));
+   if monthc="JAN" then month="01";
+   else if monthc="FEB" then month="02";
+   else if monthc="MAR" then month="03";
+   else if monthc="APR" then month="04";
+   else if monthc="MAY" then month="05";
+   else if monthc="JUN" then month="06";
+   else if monthc="JUL" then month="07";
+   else if monthc="AUG" then month="08";
+   else if monthc="SEP" then month="09";
+   else if monthc="OCT" then month="10";
+   else if monthc="NOV" then month="11";
+   else if monthc="DEC" then month="12";
+   year=scan(date,3,'/');
+
+   isodtc=catx("-",year,month,day);
+
+run;
+
+/*=========================================================
+Create the VISITNUM and VISIT variables
+=========================================================*/
+
+data dates02;
+   set dates01;
+   length visit $40;
+   if folder="SCR" then do;
+      visit="SCREENING";
+      visitnum=1;
+   end;
+   else if index(upcase(folder),"WEEK") then do;
+      visit=upcase(folder);
+      visitnum=100+input(compress(folder,,'kd'),best.);
+   end;
+   else if substrn(upcase(folder),1,2)="FU" then do;
+      visit=tranwrd(upcase(folder),"FU","FOLLOW-UP ");
+      visitnum=200+input(compress(folder,,'kd'),best.);
+   end;
+   else if substrn(folder,1,4)="UNS_" then do;
+      visit="UNSCHEDULED";
+      visitnum=999;
+   end;
+run;
+
+/*=========================================================
+Remap unscheduled visits based on previous scheduled visit
+=========================================================*/
+
+proc sort data=dates02;
+   by study pt isodtc visitnum visit;
+run;
+
+data dates03;
+   set dates02(rename=(visitnum=orig_visitnum visit=orig_visit));
+   by study pt isodtc orig_visitnum orig_visit;
+   length visit temp_visit $40;
+   retain temp_visitnum temp_visit;
+   if first.pt then call missing(visitnum,visit);
+
+   if orig_visitnum = 999 then do;
+      if first.isodtc then dec_counter+0.01;
+      visitnum=temp_visitnum+dec_counter;
+      visit=catx(" ", temp_visit,"UNSCHEDULED",put(dec_counter*100,z2.));
+   end;
+   else do;
+      dec_counter=0;
+      temp_visitnum=orig_visitnum;
+      temp_visit=orig_visit;
+      visitnum=orig_visitnum;
+      visit=orig_visit;
+   end;
+run;
+
+/*=========================================================
+Get the earliest and latest end dates in each visit, and create SVUPDES variable
+=========================================================*/
+proc sort data=dates03;
+   by study pt visitnum visit isodtc;
+run;
+
+data svstdtc;
+   set dates03;
+   by study pt visitnum visit isodtc;
+   if first.visit;
+   svstdtc=isodtc;
+run;
+
+data svendtc;
+   set dates03;
+   by study pt visitnum visit isodtc;
+
+   length svupdes $100;
+   retain svupdes;
+   svendtc=isodtc;
+   if first.visit then svupdes="";
+   if index(svupdes,sdtmdomain)=0 and index(visit,"UNSCHE") gt 0 then svupdes=catx(",",svupdes,sdtmdomain);
+   if index(visit,"UNSCHE")=0 then svupdes="";
+   if last.visit;
+   keep study pt visitnum visit svendtc svupdes;
+run;
+
+/*=========================================================
+Combine start and end dates into a single dataset
+=========================================================*/
+
+data dates04;
+   merge svstdtc(in=a) svendtc(in=b);
+   by study pt visitnum visit;
+run;
+
+/*=========================================================
+Create ID variables and study day variables
+=========================================================*/
+data sv01;
+   set dates04;
+   length domain $2
+          studyid siteid usubjid subjid $20
+   ;
+
+   studyid=study;
+   domain="SV";
+   subjid=pt;
+   siteid=substrn(pt,1,2);
+   usubjid=catx("-",study,pt);
+   svstdt=input(substrn(svstdtc,1,10),??yymmdd10.);
+   svendt=input(substrn(svendtc,1,10),??yymmdd10.);
+   format svstdt svendt date9.;
+run;
+
+data dm01;
+   set dm;
+   keep usubjid rfstdt;
+   rfstdt=input(substrn(rfstdtc,1,10),yymmdd10.);
+   format rfstdt date9.;
+run;
+
+proc sort data=dm01;
+   by usubjid;
+run;
+
+data sv02;
+   merge sv01(in=a) dm01(in=b);
+   by usubjid;
+   if a and b;
+   if nmiss(svstdt,rfstdt)=0 then svstdy=svstdt-rfstdt+(svstdt>=rfstdt);
+   if nmiss(svendt,rfstdt)=0 then svendy=svendt-rfstdt+(svendt>=rfstdt);
+run;
+
+/*=========================================================
+Write attributes and keep only required variables and in the required order
+=========================================================*/
+
+%let varlist=STUDYID DOMAIN USUBJID VISITNUM VISIT SVSTDTC SVENDTC SVSTDY SVENDY SVUPDES;
+data sv;
+   attrib
+   STUDYID label='Study Identifier'
+   DOMAIN label='Domain Abbreviation'
+   USUBJID label='Unique Subject Identifier'
+   VISITNUM label='Visit Number'
+   VISIT label='Visit Name'
+   SVSTDTC label='Start Date/Time of Visit'
+   SVENDTC label='End Date/Time of Visit'
+   SVSTDY label='Study Day of Start of Visit'
+   SVENDY label='Study Day of End of Visit'
+   SVUPDES label='Description of Unplanned Visit'
+   ;
+   set sv02;
+   keep &varlist.;
+run;
+
+/*=========================================================
+Save final copies of the datasets with dataset labels
+=========================================================*/
+
+options validvarname=v7;
+
+proc sort data=sv out=osCSG001.SV(label="Subject Visits");
+   by usubjid visitnum;
+run;
+
+/*=========================================================
+Create xpt files
+=========================================================*/
+
+%let xptpath=%sysfunc(pathname(osCSG001))\xpt\;
+
+libname sv xport "&xptpath.\SV.xpt";
+
+proc copy in=osCSG001 out=sv;
+   select sv;
+run;
+
+libname SV;
